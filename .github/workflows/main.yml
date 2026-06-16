@@ -1,4 +1,4 @@
-name: Build Lib
+name: Build Icecam
 on: [push]
 
 jobs:
@@ -11,18 +11,19 @@ jobs:
       - name: Setup NDK
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r26d # Используем свежий NDK
+          ndk-version: r26d
       - name: Build
         run: |
           mkdir build && cd build
           cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
                 -DANDROID_ABI=arm64-v8a \
                 -DANDROID_PLATFORM=android-30 \
+                -DCMAKE_POLICY_DEFAULT_CMP0148=OLD \
                 ../jni
           make
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: icecam_lib
+          name: libicecam
           path: build/libicecam_hook.so
           
