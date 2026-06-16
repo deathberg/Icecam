@@ -1,16 +1,12 @@
 cmake_minimum_required(VERSION 3.10.2)
 
-# Фиксируем поведение политик ДО входа в любые поддиректории.
-# CACHE-переменные применяются даже если shadowhook_source/CMakeLists.txt
-# вызывает свой собственный cmake_minimum_required() с другой версией.
+# CMP0148 (Find Python-модули) — ещё поддерживается как deprecated OLD в CMake 4.x,
+# оставляем на случай, если какой-то третьесторонний скрипт внутри shadowhook его использует.
+# CMP0026 убран: начиная с CMake 4.x OLD-поведение для него запрещено жёстко (ошибка, не warning).
 set(CMAKE_POLICY_DEFAULT_CMP0148 OLD CACHE STRING "" FORCE)
-set(CMAKE_POLICY_DEFAULT_CMP0026 OLD CACHE STRING "" FORCE)
 
 if(POLICY CMP0148)
   cmake_policy(SET CMP0148 OLD)
-endif()
-if(POLICY CMP0026)
-  cmake_policy(SET CMP0026 OLD)
 endif()
 
 project(icecam CXX)
@@ -34,7 +30,6 @@ target_link_libraries(icecam_hook
     dl
 )
 
-# Складываем готовый .so в предсказуемое место
 set_target_properties(icecam_hook PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib/${ANDROID_ABI}
 )
