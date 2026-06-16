@@ -21,6 +21,11 @@ jobs:
           ndk-version: r26d
           add-to-path: false
 
+      - name: Install recent CMake (нужен >=4.0.2 для shadowhook)
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "latest"
+
       - name: Configure CMake
         run: |
           cmake -S jni -B build \
