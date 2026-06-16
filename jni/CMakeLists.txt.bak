@@ -1,0 +1,21 @@
+cmake_minimum_required(VERSION 3.10.2)
+project(icecam)
+
+# Добавляем ShadowHook
+# Указываем путь к папке, где лежат .c файлы ShadowHook
+add_library(shadowhook STATIC 
+            shadowhook/shadowhook.c 
+            shadowhook/sh_aarch64.c 
+            shadowhook/sh_arm.c 
+            # ... здесь нужно перечислить остальные .c файлы из папки shadowhook
+)
+
+# Наша библиотека
+add_library(icecam_hook SHARED hook.cpp)
+
+# Указываем, где искать заголовки shadowhook.h
+target_include_directories(icecam_hook PRIVATE shadowhook)
+target_include_directories(shadowhook PUBLIC shadowhook)
+
+# Связываем
+target_link_libraries(icecam_hook shadowhook log)
