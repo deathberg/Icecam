@@ -3,21 +3,16 @@ project(icecam_hook)
 
 set(SHADOWHOOK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shadowhook)
 
-# Все необходимые папки с заголовками
+# Пути для заголовков
 include_directories(
     ${SHADOWHOOK_DIR}
     ${SHADOWHOOK_DIR}/include
     ${SHADOWHOOK_DIR}/common
     ${SHADOWHOOK_DIR}/arch
-    ${SHADOWHOOK_DIR}/arch/arm
-    ${SHADOWHOOK_DIR}/arch/arm64
     ${SHADOWHOOK_DIR}/third_party
-    ${SHADOWHOOK_DIR}/third_party/bsd
-    ${SHADOWHOOK_DIR}/third_party/lss
-    ${SHADOWHOOK_DIR}/third_party/xdl
 )
 
-# Автоматически собираем все .c и .S файлы ShadowHook
+# Автоматически собрать все .c и .S файлы ShadowHook
 file(GLOB_RECURSE SHADOWHOOK_SOURCES
     ${SHADOWHOOK_DIR}/*.c
     ${SHADOWHOOK_DIR}/*.S
