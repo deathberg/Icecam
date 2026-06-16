@@ -1,51 +1,14 @@
-cmake_minimum_required(VERSION 3.10)
-project(icecam_hook)
+cmake_minimum_required(VERSION 3.10.2)
+project(icecam)
 
-set(SHADOWHOOK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shadowhook)
+# Подключаем ShadowHook как подпроект из папки shadowhook_source
+add_subdirectory(shadowhook_source)
 
-# Определяем архитектуру по ABI (сразу)
-if(ANDROID_ABI STREQUAL "arm64-v8a")
-    set(SHADOWHOOK_ARCH "arm64")
-elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
-    set(SHADOWHOOK_ARCH "arm")
-else()
-    message(FATAL_ERROR "Unsupported ABI: ${ANDROID_ABI}")
-endif()
-
-# Теперь, когда архитектура известна, добавляем все пути
-include_directories(
-    ${SHADOWHOOK_DIR}
-    ${SHADOWHOOK_DIR}/include
-    ${SHADOWHOOK_DIR}/common
-    ${SHADOWHOOK_DIR}/arch
-    ${SHADOWHOOK_DIR}/arch/${SHADOWHOOK_ARCH}      # <-- критический путь для sh_inst.h
-    ${SHADOWHOOK_DIR}/third_party
-    ${SHADOWHOOK_DIR}/third_party/bsd
-    ${SHADOWHOOK_DIR}/third_party/lss
-    ${SHADOWHOOK_DIR}/third_party/xdl
-)
-
-# Собираем все исходники
-file(GLOB_RECURSE ALL_SOURCES
-    ${SHADOWHOOK_DIR}/*.c
-    ${SHADOWHOOK_DIR}/*.S
-)
-
-# Исключаем ненужную архитектурную папку из компиляции
-if(SHADOWHOOK_ARCH STREQUAL "arm64")
-    list(FILTER ALL_SOURCES EXCLUDE REGEX "${SHADOWHOOK_DIR}/arch/arm/")
-else()
-    list(FILTER ALL_SOURCES EXCLUDE REGEX "${SHADOWHOOK_DIR}/arch/arm64/")
-endif()
-
-# Статическая библиотека ShadowHook
-add_library(shadowhook STATIC ${ALL_SOURCES})
-
-# Твоя основная библиотека
+# Создаем твою библиотеку
 add_library(icecam_hook SHARED hook.cpp)
 
-# Линковка
-target_link_libraries(icecam_hook shadowhook)
+# Указываем пути к заголовкам shadowhook
+target_include_directories(icecam_hook PRIVATE shadowhook_source/include)
 
-# Отладочные флаги
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
+# Линкуем
+target_link_libraries(icecam_hook shadowhook log)
