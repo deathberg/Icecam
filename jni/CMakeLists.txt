@@ -1,10 +1,6 @@
 cmake_minimum_required(VERSION 3.10.2)
 
-# CMP0148 (Find Python-модули) — ещё поддерживается как deprecated OLD в CMake 4.x,
-# оставляем на случай, если какой-то третьесторонний скрипт внутри shadowhook его использует.
-# CMP0026 убран: начиная с CMake 4.x OLD-поведение для него запрещено жёстко (ошибка, не warning).
 set(CMAKE_POLICY_DEFAULT_CMP0148 OLD CACHE STRING "" FORCE)
-
 if(POLICY CMP0148)
   cmake_policy(SET CMP0148 OLD)
 endif()
@@ -14,8 +10,22 @@ project(icecam CXX)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ---- ShadowHook ----
+# ---- ShadowHook (вендорный код) ----
 add_subdirectory(shadowhook_source)
+
+# Форк shadowhook включает -Werror + новые диагностики Clang
+# (-Wunsafe-buffer-usage, -Wdeclaration-after-statement), которых
+# не было, когда писался оригинальный C-код. Патчить исходники
+# не будем — просто понижаем эти варнинги обратно до warning,
+# и только для таргетов из shadowhook_source.
+get_property(_sh_targets DIRECTORY shadowhook_source PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_t ${_sh_targets})
+  target_compile_options(${_t} PRIVATE
+      -Wno-error
+      -Wno-unsafe-buffer-usage
+      -Wno-declaration-after-statement
+  )
+endforeach()
 
 # ---- Твоя библиотека ----
 add_library(icecam_hook SHARED hook.cpp)
