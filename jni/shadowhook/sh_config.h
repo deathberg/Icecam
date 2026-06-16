@@ -1,5 +1,8 @@
 #ifndef SH_CONFIG_H
 #define SH_CONFIG_H
-#define SH_PACKAGE_NAME "shadowhook"
-#define SH_PACKAGE_VERSION "2.0.1"
+
+#define SHADOWHOOK_VERSION "1.0.0"
+#define SH_CONFIG_ARM 1
+#define SH_CONFIG_ARM64 1
+
 #endif
