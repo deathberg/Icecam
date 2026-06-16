@@ -3,7 +3,7 @@ project(icecam_hook)
 
 set(SHADOWHOOK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shadowhook)
 
-# Определяем архитектуру по ABI (сразу)
+# Определяем архитектуру по ABI
 if(ANDROID_ABI STREQUAL "arm64-v8a")
     set(SHADOWHOOK_ARCH "arm64")
 elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
@@ -12,26 +12,25 @@ else()
     message(FATAL_ERROR "Unsupported ABI: ${ANDROID_ABI}")
 endif()
 
-# Теперь, когда архитектура известна, добавляем все пути
+# Пути для заголовков (все нужные)
 include_directories(
     ${SHADOWHOOK_DIR}
     ${SHADOWHOOK_DIR}/include
     ${SHADOWHOOK_DIR}/common
     ${SHADOWHOOK_DIR}/arch
-    ${SHADOWHOOK_DIR}/arch/${SHADOWHOOK_ARCH}      # <-- критический путь для sh_inst.h
     ${SHADOWHOOK_DIR}/third_party
     ${SHADOWHOOK_DIR}/third_party/bsd
     ${SHADOWHOOK_DIR}/third_party/lss
     ${SHADOWHOOK_DIR}/third_party/xdl
 )
 
-# Собираем все исходники
+# Собираем все .c и .S файлы
 file(GLOB_RECURSE ALL_SOURCES
     ${SHADOWHOOK_DIR}/*.c
     ${SHADOWHOOK_DIR}/*.S
 )
 
-# Исключаем ненужную архитектурную папку из компиляции
+# Исключаем ненужную архитектурную папку
 if(SHADOWHOOK_ARCH STREQUAL "arm64")
     list(FILTER ALL_SOURCES EXCLUDE REGEX "${SHADOWHOOK_DIR}/arch/arm/")
 else()
