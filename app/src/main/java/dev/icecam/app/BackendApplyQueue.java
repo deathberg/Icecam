@@ -98,8 +98,9 @@ public final class BackendApplyQueue {
                 }
 
                 boolean ok = legacyApplyMediaOnce(req, false);
-                if (!ok) {
-                    log.log("applyq", "first apply failed for #" + req.sequence + "; restarting daemon");
+                if (!ok && !RootBinderShell.isServiceAvailable(RootBootstrap.FIXED_SERVICE_NAME)) {
+                    // Only redeploy if the apply failed AND the service is actually gone.
+                    log.log("applyq", "apply failed and service missing #" + req.sequence + "; one-shot bootstrap");
                     binder.clearCache();
                     prefs.edit().putString("IceCamState", "RECOVERING_BACKEND").apply();
                     root.bootstrap();
@@ -150,10 +151,12 @@ public final class BackendApplyQueue {
                 if (staged != null) log.log("applyq", "staged " + req.path + " -> " + staged);
 
                 binder.setPreferredService(RootBootstrap.FIXED_SERVICE_NAME);
-                BackendHealth h = BackendHealth.probe();
-                if (!h.fullyReady()) {
-                    SmartDiagnostics.trace(log, SmartDiagnostics.Stage.BINDER_SERVICE, false, "precheck " + h.summary());
-                    log.log("applyq", "backend not ready; bootstrap before TX (" + h.summary() + ")");
+                // Faithful to the original: only (re)deploy when the binder service is
+                // genuinely missing (daemon dead). Do NOT gate on hook maps — a working
+                // injected libvc.so shows as "(deleted)" and must not trigger a redeploy.
+                if (!RootBinderShell.isServiceAvailable(RootBootstrap.FIXED_SERVICE_NAME)) {
+                    SmartDiagnostics.trace(log, SmartDiagnostics.Stage.BINDER_SERVICE, false, "service missing; one-shot bootstrap");
+                    log.log("applyq", "service missing; bootstrap before TX");
                     root.bootstrap();
                     sleepMs(900);
                     binder.clearCache();

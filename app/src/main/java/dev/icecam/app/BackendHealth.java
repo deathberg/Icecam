@@ -36,9 +36,10 @@ public final class BackendHealth {
                 + "  echo \"$out\" | grep -Eqi ': found' && SERVICE=yes\n"
                 + "fi\n"
                 + "CAM_PID=$(pidof cameraserver 2>/dev/null)\n"
-                + "if [ -n \"$CAM_PID\" ]; then\n"
-                + "  if grep -E 'libvc(\\.so|\\+\\+\\.so)( |$)' /proc/$CAM_PID/maps 2>/dev/null | grep -v '(deleted)' >/dev/null; then HOOK=yes; fi\n"
-                + "fi\n"
+                // A mapped libvc.so (even shown as "(deleted)" because the on-disk inode was
+                // replaced after injection) means the hook is live in cameraserver. Deleted
+                // mappings are the normal, working state — do NOT treat them as a failure.
+                + "if [ -n \"$CAM_PID\" ] && grep -qi libvc /proc/$CAM_PID/maps 2>/dev/null; then HOOK=yes; fi\n"
                 + "for ext in jpg jpeg png mp4 bin; do\n"
                 + "  if [ -f " + Shell.q(MediaStager.STAGE_DIR) + ".${ext} ]; then STAGED=yes; break; fi\n"
                 + "done\n"

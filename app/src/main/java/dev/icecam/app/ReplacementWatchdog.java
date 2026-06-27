@@ -6,25 +6,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Health-only watchdog.
+ * Passive status poller — modeled on the original {@code App} 1-second timer
+ * ({@code D0/i.java} case 9) which only calls TX13 {@code c()} to refresh status
+ * and re-acquires the binder via {@code U/t.E()} when needed.
  *
- * The original IceCam APK does NOT poll the daemon. Apply path was a single
- * {@code t.a0(path, 1)} call (TX14) — once playback was started, no further
- * binder traffic was needed.
+ * IMPORTANT: this watchdog must NEVER re-deploy, re-bootstrap, re-bake or re-apply
+ * media. Earlier builds did, which restarted the native decoder every few seconds
+ * and on every button press, resetting the stream. The native daemon keeps looping
+ * the source on its own; no keep-alive traffic is required.
  *
- * v28's watchdog re-issued TX22+TX14+TX11 every 4.5 s, which restarted the
- * native decoder and is the most likely cause of the "image flashes for a
- * moment, then disappears" symptom.
- *
- * v29 keeps a passive watcher that only:
- *   - probes {@link BackendHealth} every 10 s while replacement is active,
- *   - triggers a one-shot {@link RootBootstrap#bootstrap()} if cameraserver lost
- *     the hook (e.g. cameraserver process was killed and respawned),
- *   - re-issues TX14 ONLY if the daemon process restarted (binder death recipient
- *     fired) and the path needs to be reset.
+ * Recovery (a single bootstrap) happens only when the binder service has genuinely
+ * disappeared (daemon died) — detected by {@code service check}, not by hook maps.
  */
 public final class ReplacementWatchdog {
-    private static final long WATCHDOG_INTERVAL_MS = 10_000L;
+    private static final long POLL_INTERVAL_MS = 2000L;
     private static volatile ReplacementWatchdog instance;
 
     public static ReplacementWatchdog get(Context ctx) {
@@ -41,22 +36,17 @@ public final class ReplacementWatchdog {
         return local;
     }
 
-    private final Context ctx;
     private final SharedPreferences prefs;
     private final AppLogger log;
-    private final RootBootstrap root;
     private final VliveBinderClient binder;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicReference<String> activePath = new AtomicReference<>(null);
-    private long lastProbeMs = 0L;
-    private long probeCount = 0L;
-    private long recoveryCount = 0L;
+    private long pollCount = 0L;
+    private int lastStatus = -1;
 
     private ReplacementWatchdog(Context appCtx) {
-        this.ctx = appCtx;
-        this.prefs = ctx.getSharedPreferences("app_config", Context.MODE_PRIVATE);
-        this.log = new AppLogger(ctx);
-        this.root = new RootBootstrap(ctx, log);
+        this.prefs = appCtx.getSharedPreferences("app_config", Context.MODE_PRIVATE);
+        this.log = new AppLogger(appCtx);
         this.binder = new VliveBinderClient(log);
         this.binder.setPreferredService(RootBootstrap.FIXED_SERVICE_NAME);
     }
@@ -67,57 +57,49 @@ public final class ReplacementWatchdog {
         startIfNeeded();
     }
 
-    public void markInactive() {
-        activePath.set(null);
-    }
+    public void markInactive() { activePath.set(null); }
 
     private void startIfNeeded() {
         if (!running.compareAndSet(false, true)) return;
-        new Thread(this::loop, "icecam-watchdog").start();
+        new Thread(this::loop, "icecam-status-poll").start();
     }
 
     private void loop() {
         try {
-            log.log("watchdog", "started interval=" + WATCHDOG_INTERVAL_MS + "ms");
-            while (true) {
-                String path = activePath.get();
-                if (path == null) break;
-                try { Thread.sleep(WATCHDOG_INTERVAL_MS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
-                probe(path);
+            log.log("poll", "status poller started interval=" + POLL_INTERVAL_MS + "ms");
+            while (activePath.get() != null) {
+                try { Thread.sleep(POLL_INTERVAL_MS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+                poll();
             }
         } finally {
             running.set(false);
-            log.log("watchdog", "stopped probeCount=" + probeCount + " recoveryCount=" + recoveryCount);
+            log.log("poll", "status poller stopped pollCount=" + pollCount);
         }
     }
 
-    private void probe(String stagedPath) {
+    /** Read-only status refresh. Re-acquires binder if the cached ref died. No bootstrap, no re-apply. */
+    private void poll() {
         try {
-            probeCount++;
-            BackendHealth h = BackendHealth.probe();
-            lastProbeMs = System.currentTimeMillis();
-            log.log("watchdog", "probe #" + probeCount + " " + h.summary());
-            if (h.fullyReady()) return;
-
-            recoveryCount++;
-            log.log("watchdog", "unhealthy " + h.summary() + "; bootstrap + re-apply path");
-            root.bootstrap();
-            binder.clearCache();
-            if (binder.connected()) {
-                int mode = binder.setModeString(1, stagedPath);
-                int status = binder.getInt15();
-                log.log("watchdog", "recovery TX14=" + mode + " TX15=" + status + " path=" + stagedPath);
-            } else {
-                log.log("watchdog", "recovery skipped: " + binder.lastError());
+            pollCount++;
+            if (!binder.connected()) {
+                // Binder ref died. Try a cheap re-acquire (setenforce 0/getService/setenforce 1).
+                binder.clearCache();
+                if (!binder.connected()) {
+                    lastStatus = -1;
+                    return;
+                }
             }
+            int status = binder.getInt15(); // TX15 f() — 5 means playing
+            lastStatus = status;
         } catch (Throwable t) {
-            log.log("watchdog", "probe error: " + t);
+            log.log("poll", "poll error: " + t);
         }
     }
+
+    public int lastStatus() { return lastStatus; }
 
     public String status() {
         return "running=" + running.get() + " path=" + activePath.get()
-                + " probeCount=" + probeCount + " recoveryCount=" + recoveryCount
-                + " lastProbeMs=" + lastProbeMs;
+                + " pollCount=" + pollCount + " lastStatus=" + lastStatus + " (5=playing)";
     }
 }

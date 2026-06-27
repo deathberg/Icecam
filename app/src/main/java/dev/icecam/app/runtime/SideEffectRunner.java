@@ -15,36 +15,32 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Side effects for the runtime command bus.
+ * Side effects for the runtime command bus, rewritten to the original
+ * {@code icecamtest.apk} control model.
  *
- * Reverse engineering of the original {@code icecamtest.apk} established the real
- * native capabilities of the {@code vcplax} daemon:
- *
+ * Native daemon control surface (from {@code d1/f.java}):
  * <ul>
- *   <li>TX14 {@code i(path, mode)} — set source file and start playback.</li>
- *   <li>TX18 {@code g(int)}        — rotation in degrees (0/90/180/270). LIVE, no restart.</li>
- *   <li>TX19 {@code d(bool)}       — horizontal mirror. LIVE, no restart.</li>
- *   <li>TX17 {@code a(bool)}       — loop on/off. LIVE.</li>
- *   <li>TX24 {@code h(...)}        — AutoColor (irradiation), NOT geometry.</li>
+ *   <li>TX14 {@code i(path, mode)} — set source file + start (one call, like {@code t.a0}).</li>
+ *   <li>TX18 {@code g(int)}        — rotation degrees. LIVE, no decoder restart.</li>
+ *   <li>TX19 {@code d(bool)}       — horizontal mirror. LIVE.</li>
+ *   <li>TX17 {@code a(bool)}       — loop. LIVE.</li>
+ *   <li>TX24 {@code h(...)}        — AutoColor (NOT geometry). Unused here.</li>
  * </ul>
  *
- * The native daemon has <b>no pan / zoom / crop</b> support. Previous builds sent
- * TX24 on every control tap (interpreted as color) and re-ran the full TX14 apply,
- * which restarted the decoder and caused lag / stream interruption / wrong mapping.
- *
- * v30 routing:
+ * Control routing:
  * <ul>
- *   <li>Pan / zoom / crop / fit-fill / mirrorV (image only): baked into a JPEG via
- *       {@link MediaTransformer}, applied with a single debounced TX14. Rotation and
- *       mirrorH are also baked for images so the rendered frame matches the preview.</li>
- *   <li>Video sources: rotation -> TX18, mirrorH -> TX19, loop -> TX17 live. Pan/zoom/crop
- *       are not supported natively for video and are skipped (preview still reflects them).</li>
+ *   <li><b>Rotation / mirrorH / loop</b> (any source): single live TX18/TX19/TX17. These
+ *       never re-bake and never reload the source, so the stream is not interrupted.</li>
+ *   <li><b>Pan / zoom / crop / fit-fill / mirrorV</b> (image sources only): baked into a
+ *       JPEG (rotation + mirrorH excluded — handled live) and applied with one debounced
+ *       TX14. Video cannot be re-baked, so these are skipped for video.</li>
  * </ul>
  *
- * All native traffic is debounced so a burst of taps collapses into one apply.
+ * Nothing here ever bootstraps/redeploys the daemon. Recovery is handled solely by
+ * {@link BackendApplyQueue} and only when the binder service is genuinely gone.
  */
 public final class SideEffectRunner {
-    private static final long DEBOUNCE_MS = 320L;
+    private static final long DEBOUNCE_MS = 280L;
 
     private final Context context;
     private final AppLogger log;
@@ -54,9 +50,10 @@ public final class SideEffectRunner {
     private final ExecutorService io = Executors.newSingleThreadExecutor(r -> new Thread(r, "icecam-runtime-effects"));
     private final ScheduledExecutorService debounce = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "icecam-runtime-debounce"));
 
-    private ScheduledFuture<?> pendingApply;
-    private volatile long lastAppliedFlags = Long.MIN_VALUE;
-    private volatile String lastAppliedSig = "";
+    private ScheduledFuture<?> pendingBake;
+    private volatile int lastRotationDeg = Integer.MIN_VALUE;
+    private volatile int lastMirrorH = Integer.MIN_VALUE;
+    private volatile String lastBakeSig = "";
 
     public SideEffectRunner(Context context, AppLogger log) {
         this.context = context.getApplicationContext();
@@ -70,48 +67,49 @@ public final class SideEffectRunner {
     public void run(RuntimeCommand c, AppState state, CommandBus bus) {
         switch (c.type) {
             case MUTATE_TRANSFORM:
-                // Persist new transform so bake / native apply read the latest values.
-                // On-screen realtime preview is driven by the StateStore listener, so the
-                // user already sees instant feedback. The native stream updates once after
-                // the debounce window so rapid taps never restart the decoder mid-burst.
                 state.transform.save(prefs);
-                scheduleGeometryApply(state, c.source);
+                if (isVideoSource(state)) {
+                    // Video: rotation/mirror/loop are live; pan/zoom/crop unsupported.
+                    io.execute(() -> applyLiveOrientation(state.transform));
+                } else {
+                    // Image: all geometry is baked into one debounced TX14 (no desync, no live TX).
+                    scheduleBake(state);
+                }
                 break;
             case COMMIT:
-                cancelPending();
+                cancelBake();
                 io.execute(() -> {
                     String opId = "commit-" + c.id;
                     boolean ok = false;
                     try {
                         state.transform.save(prefs);
-                        ok = applyGeometry(state, true);
-                    } catch (Throwable t) { if (log != null) log.log("runtime", "commit side effect failed #" + c.id + ": " + t); }
+                        ok = applyMedia(state, true);
+                        if (isVideoSource(state)) applyLiveOrientation(state.transform);
+                    } catch (Throwable t) { if (log != null) log.log("runtime", "commit failed #" + c.id + ": " + t); }
                     bus.dispatch(RuntimeCommand.opFinished(opId, ok));
                 });
                 break;
             case START_REPLACEMENT:
-                cancelPending();
+                cancelBake();
                 io.execute(() -> {
                     String opId = "start-" + c.id;
                     boolean ok = false;
                     try {
-                        binder.setPreferredService(RootBootstrap.FIXED_SERVICE_NAME);
-                        if (!binder.connected()) { root.bootstrap(); binder.clearCache(); sleep(350); }
                         state.transform.save(prefs);
-                        lastAppliedFlags = Long.MIN_VALUE; // force a fresh native apply
-                        lastAppliedSig = "";
-                        ok = applyGeometry(state, true);
-                    } catch (Throwable t) { if (log != null) log.log("runtime", "start side effect failed #" + c.id + ": " + t); }
+                        resetLiveCache();
+                        ok = applyMedia(state, true);
+                        if (isVideoSource(state)) applyLiveOrientation(state.transform);
+                    } catch (Throwable t) { if (log != null) log.log("runtime", "start failed #" + c.id + ": " + t); }
                     bus.dispatch(RuntimeCommand.opFinished(opId, ok));
                 });
                 break;
             case RESTORE_CAMERA:
-                cancelPending();
+                cancelBake();
                 io.execute(() -> {
                     String opId = "restore-" + c.id;
                     boolean ok = false;
-                    try { root.restoreCamera(); binder.clearCache(); lastAppliedSig = ""; lastAppliedFlags = Long.MIN_VALUE; ok = true; }
-                    catch (Throwable t) { if (log != null) log.log("runtime", "restore side effect failed #" + c.id + ": " + t); }
+                    try { root.restoreCamera(); binder.clearCache(); resetLiveCache(); ok = true; }
+                    catch (Throwable t) { if (log != null) log.log("runtime", "restore failed #" + c.id + ": " + t); }
                     bus.dispatch(RuntimeCommand.opFinished(opId, ok));
                 });
                 break;
@@ -119,114 +117,93 @@ public final class SideEffectRunner {
                 io.execute(() -> {
                     try {
                         if (binder.connected()) {
-                            int r = binder.sendBoolCode(VliveBinderClient.TX_ZERO_17, state.media.loop); // TX17 a(loop)
+                            int r = binder.sendBoolCode(VliveBinderClient.TX_ZERO_17, state.media.loop);
                             if (log != null) log.log("runtime", "TX17 loop=" + state.media.loop + " -> " + r);
                         }
-                    } catch (Throwable t) { if (log != null) log.log("runtime", "loop side effect failed: " + t); }
+                    } catch (Throwable t) { if (log != null) log.log("runtime", "loop failed: " + t); }
                 });
                 break;
             default: break;
         }
     }
 
-    private void scheduleGeometryApply(AppState state, RuntimeTypes.Source source) {
-        cancelPending();
-        pendingApply = debounce.schedule(() -> io.execute(() -> {
-            try { applyGeometry(state, false); }
-            catch (Throwable t) { if (log != null) log.log("runtime", "debounced apply failed: " + t); }
+    /** Rotation + mirrorH via live TX18/TX19. Cheap, idempotent, never restarts the stream. */
+    private void applyLiveOrientation(TransformState s) {
+        if (!prefs.getBoolean("ReplacementActive", false)) return;
+        try {
+            if (!binder.connected()) return;
+            int angle = s.rotationQuadrant() * 90;
+            int mir = s.mirrorH() ? 1 : 0;
+            if (angle != lastRotationDeg) {
+                int r = binder.sendIntCode(VliveBinderClient.TX_INT_18, angle); // TX18 g(angle)
+                lastRotationDeg = angle;
+                if (log != null) log.log("runtime", "TX18 rotation=" + angle + " -> " + r);
+            }
+            if (mir != lastMirrorH) {
+                int r = binder.sendBoolCode(VliveBinderClient.TX_ZERO_19, mir == 1); // TX19 d(mirror)
+                lastMirrorH = mir;
+                if (log != null) log.log("runtime", "TX19 mirrorH=" + (mir == 1) + " -> " + r);
+            }
+        } catch (Throwable t) { if (log != null) log.log("runtime", "live orientation failed: " + t); }
+    }
+
+    private void scheduleBake(AppState state) {
+        cancelBake();
+        pendingBake = debounce.schedule(() -> io.execute(() -> {
+            try { applyMedia(state, false); }
+            catch (Throwable t) { if (log != null) log.log("runtime", "debounced bake failed: " + t); }
         }), DEBOUNCE_MS, TimeUnit.MILLISECONDS);
     }
 
-    private synchronized void cancelPending() {
-        if (pendingApply != null) { pendingApply.cancel(false); pendingApply = null; }
+    private synchronized void cancelBake() {
+        if (pendingBake != null) { pendingBake.cancel(false); pendingBake = null; }
     }
 
-    /**
-     * Apply current geometry to the live stream using the correct native channel.
-     * Returns true if the backend accepted the update (or nothing needed to change).
-     */
-    private boolean applyGeometry(AppState state, boolean force) {
-        if (!force && !prefs.getBoolean("ReplacementActive", false)) {
-            if (log != null) log.log("runtime", "geometry apply skipped: replacement inactive");
-            return false;
-        }
+    private void resetLiveCache() {
+        lastRotationDeg = Integer.MIN_VALUE;
+        lastMirrorH = Integer.MIN_VALUE;
+        lastBakeSig = "";
+    }
+
+    private boolean isVideoSource(AppState state) {
+        return MediaTransformer.isVideoPath(mediaPath(state));
+    }
+
+    private String mediaPath(AppState state) {
         String path = state.media.originalPath.length() > 0 ? state.media.originalPath : state.media.playPath;
         if (path.length() == 0) path = prefs.getString("PlayFileMp4", "");
-        if (path.length() == 0) { if (log != null) log.log("runtime", "geometry apply: no media path"); return false; }
+        return path;
+    }
 
-        TransformState s = TransformState.load(prefs);
+    /**
+     * Apply the current media + geometry with a single TX14.
+     *
+     * Image: bake the full transform (pan/zoom/crop/fit/rotate/mirror) into a JPEG so
+     * the daemon loops one self-contained frame — no live TX, no desync, stable FPS.
+     * Video: load the file directly (geometry handled live elsewhere).
+     */
+    private boolean applyMedia(AppState state, boolean force) {
+        if (!force && !prefs.getBoolean("ReplacementActive", false)) return false;
+        String path = mediaPath(state);
+        if (path.length() == 0) { if (log != null) log.log("runtime", "applyMedia: no media path"); return false; }
 
         if (MediaTransformer.isVideoPath(path)) {
-            return applyVideoGeometry(path, s, force);
-        }
-        return applyImageGeometry(path, s, force);
-    }
-
-    /**
-     * Image sources: bake every geometric operation into a JPEG and apply with a
-     * single TX14. Skip work when nothing changed since the last apply.
-     */
-    private boolean applyImageGeometry(String sourcePath, TransformState s, boolean force) {
-        String sig = sourcePath + "|" + s.summary();
-        if (!force && sig.equals(lastAppliedSig)) {
-            if (log != null) log.log("runtime", "image geometry unchanged; skip re-bake");
+            BackendApplyQueue.get(context).enqueue(path, force ? "start-video" : "video", force);
+            if (log != null) log.log("runtime", "video apply via TX14 path=" + path);
             return true;
         }
-        String baked = MediaTransformer.bakeImage(context, sourcePath, s, log);
-        if (baked == null) baked = sourcePath;
+
+        String sig = path + "|" + state.transform.summary();
+        if (!force && sig.equals(lastBakeSig)) {
+            if (log != null) log.log("runtime", "bake unchanged; skip");
+            return true;
+        }
+        String baked = MediaTransformer.bakeImage(context, path, state.transform, log);
+        if (baked == null) baked = path;
         prefs.edit().putString("BakedPlayFileMp4", baked).apply();
-        // Neutralize any live native rotation/mirror left over from a video session so
-        // the baked frame (which already contains rotation/mirror) is not double-applied.
-        try {
-            if (binder.connected()) {
-                binder.sendIntCode(VliveBinderClient.TX_INT_18, 0);   // TX18 rotation = 0
-                binder.sendBoolCode(VliveBinderClient.TX_ZERO_19, false); // TX19 mirror = off
-            }
-        } catch (Throwable ignored) {}
-        BackendApplyQueue.get(context).enqueue(baked, "geometry-image", force);
-        lastAppliedSig = sig;
-        if (log != null) log.log("runtime", "image geometry applied bake=" + baked + " " + s.summary());
+        BackendApplyQueue.get(context).enqueue(baked, force ? "start-image" : "geometry-image", force);
+        lastBakeSig = sig;
+        if (log != null) log.log("runtime", "image baked -> " + baked + " " + state.transform.summary());
         return true;
     }
-
-    /**
-     * Video sources: native daemon supports only rotation (TX18) and mirror (TX19)
-     * as live geometry. Pan/zoom/crop are not representable; preview still reflects them.
-     */
-    private boolean applyVideoGeometry(String sourcePath, TransformState s, boolean force) {
-        long flags = packLiveFlags(s);
-        if (!force && flags == lastAppliedFlags) {
-            if (log != null) log.log("runtime", "video geometry unchanged; skip");
-            return true;
-        }
-        try {
-            binder.setPreferredService(RootBootstrap.FIXED_SERVICE_NAME);
-            if (!binder.connected()) { if (log != null) log.log("runtime", "video geometry: binder not connected"); return false; }
-            int angle = s.rotationQuadrant() * 90;
-            int rot = binder.sendIntCode(VliveBinderClient.TX_INT_18, angle);     // TX18 g(angle)
-            int mir = binder.sendBoolCode(VliveBinderClient.TX_ZERO_19, s.mirrorH()); // TX19 d(mirror)
-            int loop = binder.sendBoolCode(VliveBinderClient.TX_ZERO_17, prefs.getBoolean("PlayisLoop", true)); // TX17 a(loop)
-            lastAppliedFlags = flags;
-            if (log != null) log.log("runtime", "video geometry TX18(rot=" + angle + ")=" + rot + " TX19(mir=" + s.mirrorH() + ")=" + mir + " TX17(loop)=" + loop
-                    + (hasUnsupported(s) ? " [pan/zoom/crop not supported for video]" : ""));
-            return rot >= 0 || mir >= 0;
-        } catch (Throwable t) {
-            if (log != null) log.log("runtime", "video geometry failed: " + t);
-            return false;
-        }
-    }
-
-    private static boolean hasUnsupported(TransformState s) {
-        return Math.abs(s.panX) > 0.001f || Math.abs(s.panY) > 0.001f
-                || Math.abs(s.zoomX - 1f) > 0.001f || Math.abs(s.zoomY - 1f) > 0.001f
-                || s.cropPreset() != 0;
-    }
-
-    private static long packLiveFlags(TransformState s) {
-        long v = s.rotationQuadrant() & 0x3;
-        if (s.mirrorH()) v |= 1L << 4;
-        return v;
-    }
-
-    private static void sleep(long ms) { try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
 }
