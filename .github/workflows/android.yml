@@ -1,9 +1,10 @@
 name: Android APK build
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, 'cursor/**' ]
   pull_request:
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -18,10 +19,59 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.11.1
+
+      - name: Read version from app/build.gradle
+        id: ver
+        run: |
+          NAME=$(grep -oE "versionName '[^']+'" app/build.gradle | sed "s/versionName '//;s/'//")
+          CODE=$(grep -oE 'versionCode [0-9]+' app/build.gradle | awk '{print $2}')
+          SHORT=$(git rev-parse --short HEAD)
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "label=IceCam-${NAME}-${SHORT}" >> "$GITHUB_OUTPUT"
+          echo "Version: $NAME (code $CODE) sha=$SHORT"
+
       - name: Build debug APK
         run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Rename APK for download
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk "out/${{ steps.ver.outputs.label }}.apk"
+          ls -lh out/
+
+      - name: Pack reconstructed source
+        run: |
+          mkdir -p out
+          zip -r "out/${{ steps.ver.outputs.label }}-source.zip" . \
+            -x "./.git/*" -x "./build/*" -x "./.gradle/*" \
+            -x "*/build/*" -x "./artifacts/*" -x "./out/*" >/dev/null
+          ls -lh out/
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: IceCam-v24-compact-stable-ui-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: ${{ steps.ver.outputs.label }}-apk
+          path: out/${{ steps.ver.outputs.label }}.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload reconstructed source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.label }}-source
+          path: out/${{ steps.ver.outputs.label }}-source.zip
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Print summary
+        run: |
+          {
+            echo "## IceCam build"
+            echo ""
+            echo "- Version: \`${{ steps.ver.outputs.name }}\` (code ${{ steps.ver.outputs.code }})"
+            echo "- Commit: \`${{ steps.ver.outputs.short }}\`"
+            echo "- APK artifact: **${{ steps.ver.outputs.label }}-apk**"
+            echo "- Source artifact: **${{ steps.ver.outputs.label }}-source**"
+          } >> "$GITHUB_STEP_SUMMARY"
