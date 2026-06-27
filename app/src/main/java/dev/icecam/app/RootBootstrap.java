@@ -33,7 +33,33 @@ public final class RootBootstrap {
         return FIXED_SERVICE_NAME;
     }
 
-    public String bootstrap() {
+    /**
+     * Force a full deploy/launch cycle even if backend is healthy.
+     * Use only for diagnostics or explicit user "Reset backend" action.
+     */
+    public String bootstrapForced() { return bootstrapInternal(true); }
+
+    /**
+     * Idempotent bootstrap: if the daemon is alive, the binder service is registered
+     * and libvc.so is already mapped in cameraserver, skip the destructive steps
+     * (kill / delete /data/libvc.so / relaunch) that previously broke the active
+     * frame replacement.
+     */
+    public String bootstrap() { return bootstrapInternal(false); }
+
+    private String bootstrapInternal(boolean force) {
+        if (!force) {
+            BackendHealth h = BackendHealth.probe();
+            log.log("root", "precheck " + h.summary());
+            if (h.fullyReady()) {
+                SmartDiagnostics.trace(log, SmartDiagnostics.Stage.DAEMON_ALIVE, true, "skip-redeploy (precheck OK)");
+                SmartDiagnostics.trace(log, SmartDiagnostics.Stage.BINDER_SERVICE, true, "skip-redeploy (precheck OK)");
+                SmartDiagnostics.trace(log, SmartDiagnostics.Stage.INJECT_HOOK, true, "skip-redeploy (precheck OK)");
+                Shell.Result sel = Shell.su(SelinuxPolicy.applyLivePoliciesScript());
+                log.logBlock("root", sel.all());
+                return "bootstrap=skipped (" + h.summary() + ")";
+            }
+        }
         NativeExtractor.Result ex = NativeExtractor.extract(ctx, log);
         if (!ex.ok) SmartDiagnostics.trace(log, SmartDiagnostics.Stage.EXTRACT, false, ex.log);
         else SmartDiagnostics.trace(log, SmartDiagnostics.Stage.EXTRACT, "abi=" + ex.abi + " dir=" + ex.dir);
@@ -52,7 +78,7 @@ public final class RootBootstrap {
                 "killall vcplax 2>/dev/null || true\n" +
                 "pkill -f /data/vcplax 2>/dev/null || true\n" +
                 "pkill -f $CAMERA_DIR/vcplax 2>/dev/null || true\n" +
-                "rm -rf $CAMERA_DIR /data/samera\n" +
+                "rm -rf /data/samera\n" +
                 "mkdir -p $CAMERA_DIR /data/local/tmp/icecam/mirror\n" +
                 "chattr -i $CAMERA_DIR 2>/dev/null || true\n" +
                 deployFileScript() +

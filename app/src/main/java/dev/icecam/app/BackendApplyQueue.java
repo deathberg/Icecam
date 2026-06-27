@@ -127,14 +127,20 @@ public final class BackendApplyQueue {
                 File f = new File(req.path);
                 long t0 = android.os.SystemClock.elapsedRealtime();
                 log.log("applyq", "legacy apply " + (retry ? "retry" : "start") + " #" + req.sequence + " source=" + req.source + " exists=" + f.exists() + " size=" + (f.exists() ? f.length() : -1L) + " path=" + req.path);
+
+                String staged = MediaStager.stage(req.path, log);
+                if (staged != null) log.log("applyq", "staged " + req.path + " -> " + staged);
+                String txPath = staged != null ? staged : req.path;
+
                 binder.setPreferredService(RootBootstrap.FIXED_SERVICE_NAME);
-                if (!RootBinderShell.isServiceAvailable(RootBootstrap.FIXED_SERVICE_NAME)) {
-                    SmartDiagnostics.trace(log, SmartDiagnostics.Stage.BINDER_SERVICE, false, "service missing before apply");
-                    log.log("applyq", "daemon/service missing; bootstrap before TX");
+                BackendHealth h = BackendHealth.probe();
+                if (!h.fullyReady()) {
+                    SmartDiagnostics.trace(log, SmartDiagnostics.Stage.BINDER_SERVICE, false, "precheck " + h.summary());
+                    log.log("applyq", "backend not ready; bootstrap before TX (" + h.summary() + ")");
                     root.bootstrap();
                     sleepMs(900);
+                    binder.clearCache();
                 }
-                Shell.su(SelinuxPolicy.applyLivePoliciesScript() + "service check " + RootBootstrap.FIXED_SERVICE_NAME + " 2>&1 || true\n");
                 if (!binder.connected()) {
                     binder.clearCache();
                     sleepMs(250);
@@ -142,34 +148,46 @@ public final class BackendApplyQueue {
                 if (!binder.connected()) {
                     SmartDiagnostics.trace(log, SmartDiagnostics.Stage.BINDER_CONNECT, false, binder.lastError());
                     log.log("applyq", "binder still unavailable: " + binder.lastError());
+                    setState(false, "PLAY_ERROR");
                     return false;
                 }
                 SmartDiagnostics.trace(log, SmartDiagnostics.Stage.BINDER_CONNECT, true, binder.lastError());
+
+                long tx22 = binder.setRange(0L, -1L);              // reset range/loop
                 long tx14Start = android.os.SystemClock.elapsedRealtime();
-                int mode = binder.setModeString(1, req.path); // TX14 mode 1 -> path
+                int mode = binder.setModeString(1, txPath);        // TX14 mode 1 -> path
                 long tx14Ms = android.os.SystemClock.elapsedRealtime() - tx14Start;
-                sleepMs(520);
+                sleepMs(450);
                 TransformState current = TransformState.load(prefs);
                 long tx11Start = android.os.SystemClock.elapsedRealtime();
-                int play = binder.playSource(req.path, current.mirrorH(), prefs.getBoolean("PlayisLoop", true)); // TX11
+                int play = binder.playSource(txPath, current.mirrorH(), prefs.getBoolean("PlayisLoop", true));
                 long tx11Ms = android.os.SystemClock.elapsedRealtime() - tx11Start;
+
                 boolean active = mode >= 0 && play >= 0;
-                prefs.edit()
-                        .putBoolean("ReplacementActive", active)
-                        .putString("IceCamState", active ? "REPLACEMENT_ACTIVE" : "PLAY_ERROR")
-                        .apply();
-                log.log("applyq", "legacy apply done #" + req.sequence + " TX14=" + mode + "(" + tx14Ms + "ms) TX11=" + play + "(" + tx11Ms + "ms) total=" + (android.os.SystemClock.elapsedRealtime() - t0) + "ms active=" + active);
+                setState(active, active ? "REPLACEMENT_ACTIVE" : "PLAY_ERROR");
+                if (active) {
+                    prefs.edit().putString("StagedPath", txPath).apply();
+                    ReplacementWatchdog.get(context).markActive(txPath);
+                } else {
+                    ReplacementWatchdog.get(context).markInactive();
+                }
+                log.log("applyq", "legacy apply done #" + req.sequence + " TX22=" + tx22 + " TX14=" + mode + "(" + tx14Ms + "ms) TX11=" + play + "(" + tx11Ms + "ms) total=" + (android.os.SystemClock.elapsedRealtime() - t0) + "ms active=" + active + " staged=" + (staged != null));
                 SmartDiagnostics.trace(log, SmartDiagnostics.Stage.TX_APPLY, active,
-                        "TX14=" + mode + " TX11=" + play + " path=" + req.path);
+                        "TX22=" + tx22 + " TX14=" + mode + " TX11=" + play + " path=" + txPath);
                 if (!active) binder.clearCache();
                 return active;
             } catch (Throwable t) {
-                prefs.edit().putBoolean("ReplacementActive", false).putString("IceCamState", "PLAY_ERROR").apply();
+                setState(false, "PLAY_ERROR");
+                ReplacementWatchdog.get(context).markInactive();
                 binder.clearCache();
                 log.log("applyq", "legacy apply exception #" + req.sequence + ": " + t);
                 return false;
             }
         }
+    }
+
+    private void setState(boolean active, String state) {
+        prefs.edit().putBoolean("ReplacementActive", active).putString("IceCamState", state).apply();
     }
 
     private static void sleepMs(long ms) {

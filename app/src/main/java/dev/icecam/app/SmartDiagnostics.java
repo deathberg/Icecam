@@ -82,6 +82,14 @@ public final class SmartDiagnostics {
             sb.append("lastError=").append(binder.lastError()).append('\n');
         }
 
+        try {
+            BackendHealth h = BackendHealth.probe();
+            sb.append("health-probe: ").append(h.summary()).append('\n');
+            sb.append("watchdog: ").append(ReplacementWatchdog.get(ctx).status()).append('\n');
+        } catch (Throwable t) {
+            sb.append("health-probe failed: ").append(t).append('\n');
+        }
+
         if (log != null) log.logBlock("health", sb.toString());
         return sb.toString();
     }

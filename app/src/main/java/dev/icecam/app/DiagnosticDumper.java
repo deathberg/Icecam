@@ -35,6 +35,11 @@ public final class DiagnosticDumper {
         File baked = new File(ctx.getExternalFilesDir(null), "baked");
         appendDir(sb, baked, "baked", 64);
         sb.append("\n--- trace ---\n").append(SmartDiagnostics.summary());
+        try {
+            BackendHealth bh = BackendHealth.probe();
+            sb.append("health-probe: ").append(bh.summary()).append('\n');
+            sb.append("watchdog: ").append(ReplacementWatchdog.get(ctx).status()).append('\n');
+        } catch (Throwable t) { sb.append("health probe failed: ").append(t).append('\n'); }
         sb.append("\n--- binder-java ---\n");
         try { sb.append(binder != null ? binder.diagnostics() : "binder=null\n"); } catch (Throwable t) { sb.append("binder diagnostics failed: ").append(t).append('\n'); }
         sb.append("\n--- root-native ---\n");
