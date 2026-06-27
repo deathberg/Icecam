@@ -128,7 +128,7 @@ public final class BackendApplyQueue {
                 long t0 = android.os.SystemClock.elapsedRealtime();
                 log.log("applyq", "legacy apply " + (retry ? "retry" : "start") + " #" + req.sequence + " source=" + req.source + " exists=" + f.exists() + " size=" + (f.exists() ? f.length() : -1L) + " path=" + req.path);
                 binder.setPreferredService(RootBootstrap.FIXED_SERVICE_NAME);
-                Shell.su("setenforce 0 2>/dev/null || true\nservice check " + RootBootstrap.FIXED_SERVICE_NAME + " 2>&1 || true\n");
+                Shell.su(SelinuxPolicy.applyLivePoliciesScript() + "service check " + RootBootstrap.FIXED_SERVICE_NAME + " 2>&1 || true\n");
                 if (!binder.connected()) {
                     binder.clearCache();
                     sleepMs(250);
