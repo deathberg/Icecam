@@ -34,6 +34,7 @@ public final class DiagnosticDumper {
         appendDir(sb, ctx.getExternalFilesDir(null), "externalFiles", 2);
         File baked = new File(ctx.getExternalFilesDir(null), "baked");
         appendDir(sb, baked, "baked", 64);
+        sb.append("\n--- trace ---\n").append(SmartDiagnostics.summary());
         sb.append("\n--- binder-java ---\n");
         try { sb.append(binder != null ? binder.diagnostics() : "binder=null\n"); } catch (Throwable t) { sb.append("binder diagnostics failed: ").append(t).append('\n'); }
         sb.append("\n--- root-native ---\n");
@@ -42,9 +43,11 @@ public final class DiagnosticDumper {
                     "echo ---id---; id; " +
                     "echo ---getenforce---; getenforce 2>/dev/null; " +
                     "echo ---service-check---; service check privsam_service 2>&1; " +
+                    "echo ---inject-check---; pid=$(pidof cameraserver 2>/dev/null); echo cameraserver_pid=$pid; " +
+                    "[ -n \"$pid\" ] && grep -iE 'libvc|libshadowhook' /proc/$pid/maps 2>/dev/null || echo no_hook_maps; " +
                     "echo ---process---; ps -A | grep -iE 'vcplax|privsam' 2>/dev/null; " +
                     "echo ---data-camera---; ls -l /data/camera 2>&1; " +
-                    "echo ---data-vcplax---; ls -l /data/vcplax /data/libvc.so /data/libvc++.so 2>&1; " +
+                    "echo ---data-vcplax---; for f in /data/vcplax /data/libvc.so /data/libvc++.so " + RootBootstrap.CAMERA_DIR + "/vcplax; do [ -e \"$f\" ] && ls -l \"$f\" || echo missing:$f; done; " +
                     "echo ---vcplax.log---; tail -120 /data/camera/vcplax.log 2>&1; " +
                     "echo ---vcplax.err---; tail -120 /data/camera/vcplax.err 2>&1; " +
                     "echo ---logcat-icecam---; logcat -d -v time -t 300 | grep -iE 'IceCam|icecam|vcplax|privsam|vlive|MediaCodec|BufferQueue|GraphicBuffer' 2>/dev/null");

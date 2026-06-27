@@ -7,8 +7,8 @@ android {
         applicationId 'dev.icecam.app'
         minSdk 23
         targetSdk 35
-        versionCode 25
-        versionName '0.25-v25-runtime-architecture'
+        versionCode 27
+        versionName '0.27-v27-reconstruction-diagnostics'
     }
     buildTypes {
         debug { debuggable true; minifyEnabled false }
