@@ -6,21 +6,25 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Keeps frame replacement alive after the initial TX11/TX14 apply.
+ * Health-only watchdog.
  *
- * Symptom solved: user saw the substituted image flash for a brief moment, then
- * the live camera frame returned. Likely causes the watchdog mitigates:
- *  - vcplax may finish decoding a still image and stop pushing frames;
- *  - cameraserver may open/close camera sessions which invalidate the active source;
- *  - vcplax may be killed and restarted, requiring TX14/TX11 re-issue.
+ * The original IceCam APK does NOT poll the daemon. Apply path was a single
+ * {@code t.a0(path, 1)} call (TX14) — once playback was started, no further
+ * binder traffic was needed.
  *
- * Every WATCHDOG_INTERVAL_MS the watchdog:
- *  1. Probes daemon/service/inject health.
- *  2. If hook missing but daemon dead -> trigger bootstrap.
- *  3. Re-issues TX22 range reset + TX14 path + TX11 play so the daemon keeps looping.
+ * v28's watchdog re-issued TX22+TX14+TX11 every 4.5 s, which restarted the
+ * native decoder and is the most likely cause of the "image flashes for a
+ * moment, then disappears" symptom.
+ *
+ * v29 keeps a passive watcher that only:
+ *   - probes {@link BackendHealth} every 10 s while replacement is active,
+ *   - triggers a one-shot {@link RootBootstrap#bootstrap()} if cameraserver lost
+ *     the hook (e.g. cameraserver process was killed and respawned),
+ *   - re-issues TX14 ONLY if the daemon process restarted (binder death recipient
+ *     fired) and the path needs to be reset.
  */
 public final class ReplacementWatchdog {
-    private static final long WATCHDOG_INTERVAL_MS = 4500L;
+    private static final long WATCHDOG_INTERVAL_MS = 10_000L;
     private static volatile ReplacementWatchdog instance;
 
     public static ReplacementWatchdog get(Context ctx) {
@@ -44,8 +48,9 @@ public final class ReplacementWatchdog {
     private final VliveBinderClient binder;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicReference<String> activePath = new AtomicReference<>(null);
-    private long lastPokeMs = 0L;
-    private long pokeCount = 0L;
+    private long lastProbeMs = 0L;
+    private long probeCount = 0L;
+    private long recoveryCount = 0L;
 
     private ReplacementWatchdog(Context appCtx) {
         this.ctx = appCtx;
@@ -78,42 +83,41 @@ public final class ReplacementWatchdog {
                 String path = activePath.get();
                 if (path == null) break;
                 try { Thread.sleep(WATCHDOG_INTERVAL_MS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
-                pokeBackend(path);
+                probe(path);
             }
         } finally {
             running.set(false);
-            log.log("watchdog", "stopped pokeCount=" + pokeCount);
+            log.log("watchdog", "stopped probeCount=" + probeCount + " recoveryCount=" + recoveryCount);
         }
     }
 
-    private void pokeBackend(String stagedPath) {
+    private void probe(String stagedPath) {
         try {
+            probeCount++;
             BackendHealth h = BackendHealth.probe();
-            if (!h.fullyReady()) {
-                log.log("watchdog", "unhealthy " + h.summary() + "; bootstrap");
-                root.bootstrap();
-                binder.clearCache();
+            lastProbeMs = System.currentTimeMillis();
+            log.log("watchdog", "probe #" + probeCount + " " + h.summary());
+            if (h.fullyReady()) return;
+
+            recoveryCount++;
+            log.log("watchdog", "unhealthy " + h.summary() + "; bootstrap + re-apply path");
+            root.bootstrap();
+            binder.clearCache();
+            if (binder.connected()) {
+                int mode = binder.setModeString(1, stagedPath);
+                int status = binder.getInt15();
+                log.log("watchdog", "recovery TX14=" + mode + " TX15=" + status + " path=" + stagedPath);
+            } else {
+                log.log("watchdog", "recovery skipped: " + binder.lastError());
             }
-            if (!binder.connected()) {
-                binder.clearCache();
-                if (!binder.connected()) {
-                    log.log("watchdog", "binder unavailable: " + binder.lastError());
-                    return;
-                }
-            }
-            int range = binder.setRange(0L, -1L);
-            int mode  = binder.setModeString(1, stagedPath);
-            int play  = binder.playSource(stagedPath, false, prefs.getBoolean("PlayisLoop", true));
-            pokeCount++;
-            lastPokeMs = System.currentTimeMillis();
-            log.log("watchdog", "poke #" + pokeCount + " TX22=" + range + " TX14=" + mode + " TX11=" + play + " path=" + stagedPath);
         } catch (Throwable t) {
-            log.log("watchdog", "poke error: " + t);
+            log.log("watchdog", "probe error: " + t);
         }
     }
 
     public String status() {
         return "running=" + running.get() + " path=" + activePath.get()
-                + " pokeCount=" + pokeCount + " lastPokeMs=" + lastPokeMs;
+                + " probeCount=" + probeCount + " recoveryCount=" + recoveryCount
+                + " lastProbeMs=" + lastProbeMs;
     }
 }

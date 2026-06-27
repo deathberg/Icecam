@@ -120,17 +120,34 @@ public final class BackendApplyQueue {
         }
     }
 
+    /**
+     * Original IceCam apply flow recovered from {@code f1/a.java} case 1:
+     *
+     * <pre>
+     *   File play = new File(cacheDir, "play.mp4");
+     *   copyFromGalleryUri(uri, play);
+     *   prefs.put("PlayFileType", 1);
+     *   prefs.put("PlayFileMp4",  play.absolutePath);
+     *   if (t.a0(path, 1).booleanValue()) toast("file changed successfully");
+     *   else                              toast("file set but not playing");
+     * </pre>
+     *
+     * That is: a single TX14 with (mode=1, path) starts the playback. There is no
+     * TX22 / TX11 sequence on play. Our previous v28 sent TX22 + TX14 + TX11 and a
+     * 4.5 s watchdog re-issued them — that restarted the decoder repeatedly and is
+     * what caused the briefly-flashing replacement frame.
+     */
     private boolean legacyApplyMediaOnce(ApplyRequest req, boolean retry) {
         synchronized (backendLock) {
             try {
                 prefs.edit().putString("IceCamState", "APPLYING_MEDIA").apply();
                 File f = new File(req.path);
                 long t0 = android.os.SystemClock.elapsedRealtime();
-                log.log("applyq", "legacy apply " + (retry ? "retry" : "start") + " #" + req.sequence + " source=" + req.source + " exists=" + f.exists() + " size=" + (f.exists() ? f.length() : -1L) + " path=" + req.path);
+                log.log("applyq", "apply " + (retry ? "retry" : "start") + " #" + req.sequence + " source=" + req.source + " exists=" + f.exists() + " size=" + (f.exists() ? f.length() : -1L) + " path=" + req.path);
 
                 String staged = MediaStager.stage(req.path, log);
-                if (staged != null) log.log("applyq", "staged " + req.path + " -> " + staged);
                 String txPath = staged != null ? staged : req.path;
+                if (staged != null) log.log("applyq", "staged " + req.path + " -> " + staged);
 
                 binder.setPreferredService(RootBootstrap.FIXED_SERVICE_NAME);
                 BackendHealth h = BackendHealth.probe();
@@ -153,34 +170,26 @@ public final class BackendApplyQueue {
                 }
                 SmartDiagnostics.trace(log, SmartDiagnostics.Stage.BINDER_CONNECT, true, binder.lastError());
 
-                long tx22 = binder.setRange(0L, -1L);              // reset range/loop
-                long tx14Start = android.os.SystemClock.elapsedRealtime();
-                int mode = binder.setModeString(1, txPath);        // TX14 mode 1 -> path
-                long tx14Ms = android.os.SystemClock.elapsedRealtime() - tx14Start;
-                sleepMs(450);
-                TransformState current = TransformState.load(prefs);
-                long tx11Start = android.os.SystemClock.elapsedRealtime();
-                int play = binder.playSource(txPath, current.mirrorH(), prefs.getBoolean("PlayisLoop", true));
-                long tx11Ms = android.os.SystemClock.elapsedRealtime() - tx11Start;
+                int mode = binder.setModeString(1, txPath); // TX14 (path, mode=1) starts playback (returns 4 on success)
+                int status = binder.getInt15();             // TX15 status (5 = playing)
 
-                boolean active = mode >= 0 && play >= 0;
+                boolean active = mode == 4;
                 setState(active, active ? "REPLACEMENT_ACTIVE" : "PLAY_ERROR");
                 if (active) {
                     prefs.edit().putString("StagedPath", txPath).apply();
                     ReplacementWatchdog.get(context).markActive(txPath);
                 } else {
                     ReplacementWatchdog.get(context).markInactive();
+                    binder.clearCache();
                 }
-                log.log("applyq", "legacy apply done #" + req.sequence + " TX22=" + tx22 + " TX14=" + mode + "(" + tx14Ms + "ms) TX11=" + play + "(" + tx11Ms + "ms) total=" + (android.os.SystemClock.elapsedRealtime() - t0) + "ms active=" + active + " staged=" + (staged != null));
+                log.log("applyq", "apply done #" + req.sequence + " TX14=" + mode + " TX15=" + status + " total=" + (android.os.SystemClock.elapsedRealtime() - t0) + "ms active=" + active + " staged=" + (staged != null));
                 SmartDiagnostics.trace(log, SmartDiagnostics.Stage.TX_APPLY, active,
-                        "TX22=" + tx22 + " TX14=" + mode + " TX11=" + play + " path=" + txPath);
-                if (!active) binder.clearCache();
+                        "TX14=" + mode + " (4=ok) TX15=" + status + " (5=playing) path=" + txPath);
                 return active;
             } catch (Throwable t) {
                 setState(false, "PLAY_ERROR");
-                ReplacementWatchdog.get(context).markInactive();
                 binder.clearCache();
-                log.log("applyq", "legacy apply exception #" + req.sequence + ": " + t);
+                log.log("applyq", "apply exception #" + req.sequence + ": " + t);
                 return false;
             }
         }
