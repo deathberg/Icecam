@@ -6,21 +6,27 @@ import java.util.regex.Pattern;
 
 /**
  * Root-shell Binder transport used when Java ServiceManager is blocked by SELinux.
- *
- * The daemon still registers privsam_service in servicemanager, but only root/shell
- * context can find it on many Android 13 ROMs. Root can invoke service call safely.
  */
 public final class RootBinderShell {
     private static final Pattern HEX_WORD = Pattern.compile("0x[0-9a-f]+:\\s+([0-9a-f]{8})");
     private static final Pattern PARCEL_HEAD = Pattern.compile("parcel\\(\\s*([0-9a-f]{8})");
+    private static final Pattern SERVICE_FOUND = Pattern.compile("service\\s+\\S+:\\s+found", Pattern.CASE_INSENSITIVE);
 
     private RootBinderShell() {}
 
     public static boolean isServiceAvailable(String service) {
         if (service == null || service.trim().isEmpty()) return false;
         Shell.Result r = Shell.su("service check " + Shell.q(service.trim()) + " 2>&1");
-        String all = (r.out + "\n" + r.err).toLowerCase(Locale.US);
-        return all.contains("found");
+        String all = r.out + "\n" + r.err;
+        String lo = all.toLowerCase(Locale.US);
+        if (lo.contains("not found")) return false;
+        return SERVICE_FOUND.matcher(all).find();
+    }
+
+    public static String serviceCheckOutput(String service) {
+        if (service == null || service.trim().isEmpty()) return "";
+        Shell.Result r = Shell.su("service check " + Shell.q(service.trim()) + " 2>&1");
+        return (r.out + "\n" + r.err).trim();
     }
 
     public static int transactInt(String service, int code, String descriptor, String... args) {
